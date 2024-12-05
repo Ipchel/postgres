@@ -1,0 +1,258 @@
+package <имя пакета>.buildTypes
+import jetbrains.buildServer.configs.kotlin.*
+import jetbrains.buildServer.configs.kotlin.buildFeatures.Swabra
+import jetbrains.buildServer.configs.kotlin.buildFeatures.swabra
+import jetbrains.buildServer.configs.kotlin.buildSteps.script
+
+object DVP_Tools_UploadDbChangesByParams : BuildType({
+    templates(<имя шаблона>)
+    id("UploadDbChangesByParams")
+    name = "upload db changes by params"
+    description = "upload db changes by params"
+
+    artifactRules = """
+        +: **/*.sql
+        +: **/*.xml
+        +: **/*.properties
+        +: .
+    """.trimIndent()
+    buildNumberPattern = "%build.counter%: %env.stand_name%, %env.liquibase_commands%"
+
+    params {
+        param("system.ci_username", "<имя туз>")
+        password("system.ci_password", "<пароль туз>", display = ParameterDisplay.HIDDEN)
+    }
+    steps {
+        script {
+            name = "Generate properties"
+            id = "RUNNER_2251"
+            scriptContent = """
+                cd %env.ENVS_PATH%/%env.stand_name%
+                export ANSIBLE_VAULT_PASSWORD_FILE=ansible_vault_password.txt
+                echo "%system.ci_password%" > ansible_vault_password.txt
+                echo "localhost   ansible_connection=local" > hosts
+                %ansi
+                %teamcity.tool.ansible-6.7.0%/bin/ansible-playbook generate.yml -i hosts
+            """.trimIndent()
+        }
+        script {
+            name = "Check branch and stand name"
+            id = "RUNNER_2235"
+            scriptContent = """
+                # https://<задача jira>
+
+                set -vx
+
+                branch="%teamcity.build.branch%"
+                stand="%env.stand_name%"
+
+                if [[ "${'$'}branch" =~ default|dev|feature && "${'$'}stand" =~ default|dev ]]
+                then
+                	echo "you can deploy branch '${'$'}branch' on polygon '${'$'}stand'"
+                else
+                	if [[ "${'$'}branch" =~ master ]]
+                	then
+                		if [[ "${'$'}stand" =~ default|dev ]]
+                		then
+                			echo "you can't deploy branch '${'$'}branch' on polygon '${'$'}stand'"
+                			exit 1
+                		fi
+                	else
+                		echo "you can't deploy branch '${'$'}branch' on polygon '${'$'}stand'"
+                		exit 1
+                	fi
+                fi
+            """.trimIndent()
+        }
+        script {
+            name = "Run DB script"
+            id = "RUNNER_13038"
+            scriptContent = """
+                set -vx
+
+                # DRIVER_URL="https://<сервер нексуса>/repository/<имя репозитория>/org/postgresql/postgresql/42.2.5/postgresql-42.2.5.jar"
+                # DRIVER_URL="https://<сервер нексуса>/repository/<имя репозитория>/org/postgresql/postgresql/42.2.5/postgresql-42.2.5.jar"
+                DRIVER_URL="https://<сервер нексуса>/repository/<имя репозитория>/org/postgresql/postgresql/42.2.5/postgresql-42.2.5.jar"
+
+                case %env.stand_name% in
+                    *"bff"*)
+                        SYSTEM_NAME="bff"; CONFIG_NAME="liquibase.properties";;
+                    *)
+                        SYSTEM_NAME="empty";;
+                esac
+
+                CONFIG_PATH=%env.ENVS_PATH%/%env.stand_name%/files/dbmigrations/${'$'}CONFIG_NAME
+
+                if [ -f "${'$'}CONFIG_PATH" ]; then
+                    rsync -av %env.ENVS_PATH%/%env.stand_name%/files/dbmigrations/* %env.SRC_PATH%/${'$'}SYSTEM_NAME/database/dbmigrations
+
+                    cd %env.SRC_PATH%/${'$'}SYSTEM_NAME/database/dbmigrations
+                    curl -v -u "%system.ci_username%":"%system.ci_password%"  ${'$'}DRIVER_URL -O
+                    cat ${'$'}CONFIG_NAME
+
+                    for i in ```seq 1 %env.liquibase_repeat_count%```; do 
+                      %teamcity.tool.liquibase-3.6.3%/liquibase --logLevel flag\
+                        --defaultsFile=${'$'}CONFIG_NAME \
+                        %env.liquibase_commands% 
+                    done
+
+                else
+                    echo "${'$'}CONFIG_NAME doesn't exist"
+                fi
+            """.trimIndent()
+        }
+        script {
+            name = "Run groovy"
+            id = "RUNNER_1004"
+            enabled = false
+            scriptContent = """
+                %teamcity.tool.groovy-2.5.7%/bin/groovy \
+                    -Dgrape.config=%teamcity.build.checkoutDir%/%env.SRC_PATH%/utils/tc_ci/config/grapeConfig.xml \
+                    -Dnexus_ci.user='%system.ci_username%' \
+                    -Dnexus_ci.pass='%system.ci_password%' \
+                    -Dnexus_ci.base.url='https://<сервер нексуса>/repository/<имя репозитория>/repository' \
+                    -Dnexus_ci.repo.name='esfl-maven' \
+                     %teamcity.build.checkoutDir%/%env.SRC_PATH%/utils/tc_ci/groovy/upload_db_changes.groovy
+            """.trimIndent()
+        }
+        script {
+            id = "RUNNER_738"
+            enabled = false
+            scriptContent = """
+                sshpass -p <пароль туз> ssh <имя туз>@<сервер приложений> ls -la /opt/mdm/deploy/spring_cloud_cli/bin
+                echo "env.db_host=%env.db_host%"
+                env
+            """.trimIndent()
+        }
+        script {
+            name = "liquibase diff"
+            id = "liquibase_diff"
+            enabled = false
+            scriptContent = """
+                DATABASE1_URL="jdbc:postgresql://<сервер бд>:5432/<имя бд>"
+                DATABASE2_URL="jdbc:postgresql://<сервер бд>:5432/<имя бд>"
+                echo
+                echo "Создаем changelog файл двух БД"
+                %teamcity.tool.liquibase-4.25.1%/liquibase \
+                  --changeLogFile=missing-changelog.xml \
+                  --referenceUrl=${'$'}DATABASE1_URL \
+                  --reference-username="<имя туз>" \
+                  --reference-password="<пароль туз>" \
+                  --referencedefaultSchemaName=<имя схемы> \
+                  --url=${'$'}DATABASE2_URL \
+                  --username="<имя туз>" \
+                  --password="<пароль туз>" \
+                  --includeSchema=true \
+                  --includeTablespace=false \
+                  --defaultSchemaName=<имя бд> \
+                  generateChangeLog
+                echo
+                echo "Сравниваем схемы <имя бд> в двух БД"
+                %teamcity.tool.liquibase-4.25.1%/liquibase \
+                  --changeLogFile=missing-changelog.xml \
+                  --referenceUrl=${'$'}DATABASE1_URL \
+                  --reference-username="<имя туз>" \
+                  --reference-password="<пароль туз>" \
+                  --referencedefaultSchemaName=<имя схемы> \
+                  --url=${'$'}DATABASE2_URL \
+                  --username="dvpuser" \
+                  --password="<пароль туз>" \
+                  --logLevel=info \
+                  --diffTypes=tables,columns,views,primaryKeys,foreignKeys \
+                  --outputFile=schema_diff.txt \
+                  --defaultSchemaName=<имя схемы> \
+                  diffChangeLog
+                echo
+                echo "Смотрим файл изменений"
+                cat %teamcity.build.workingDir%/schema_diff.txt
+                echo
+                echo "Обновляем схему <имя схемы> в целевой БД"
+                %teamcity.tool.liquibase-4.25.1%/liquibase \
+                  --changeLogFile=missing-changelog.xml \
+                  --url=${'$'}DATABASE2_URL \
+                  --username="<имя туз>" \
+                  --password="<пароль туз>" \
+                  --logLevel=info \
+                  --diffTypes=tables,columns,views,primaryKeys,foreignKeys \
+                  --outputFile=schema_diff.txt \
+                  --defaultSchemaName=<имя схемы> \
+                  update
+                echo
+                echo "Смотрим файл изменений"
+                cat %teamcity.build.workingDir%/schema_diff.txt
+                echo
+                echo "Смотрим статус целевой БД"
+                %teamcity.tool.liquibase-4.25.1%/liquibase \
+                  --changeLogFile=missing-changelog.xml \
+                  --url=${'$'}DATABASE2_URL \
+                  --username="<имя туз>" \
+                  --password="<пароль туз>" \
+                  --defaultSchemaName=<имя схемы> \
+                status
+                echo
+                echo "Сравниваем повторно схемы <имя схемы> в двух БД"
+                %teamcity.tool.liquibase-4.25.1%/liquibase \
+                  --changeLogFile=missing-changelog.xml \
+                  --referenceUrl=${'$'}DATABASE1_URL \
+                  --reference-username="<имя туз>" \
+                  --reference-password="<пароль туз>" \
+                  --referencedefaultSchemaName=<имя схемы> \
+                  --url=${'$'}DATABASE2_URL \
+                  --username="<имя туз>" \
+                  --password="<пароль туз>" \
+                  --logLevel=info \
+                  --diffTypes=tables,columns,views,primaryKeys,foreignKeys \
+                  --outputFile=schema_diff.txt \
+                  --defaultSchemaName=<имя схемы> \
+                  diff
+                echo
+                echo "Смотрим файл изменений"
+                cat %teamcity.build.workingDir%/schema_diff.txt
+            """.trimIndent()
+        }
+        script {
+            name = "goose"
+            id = "goose"
+            enabled = false
+            scriptContent = """
+                echo "Скачиваем приложение на агент"
+                curl -u "<имя туз>:<пароль туз>" -O https://<сервер нексуса>/repository/<имя репозитория>/goose-3.22.1
+                echo
+                echo "Выдаем права 755"
+                chmod 755 goose-3.22.1
+                echo
+                echo "Проверка содержимого каталога агента"
+                ls -laH
+                echo
+                echo "Создаем директорию миграции"
+                mkdir migrations
+                echo
+                echo "Создаем файл миграции"
+                %teamcity.build.workingDir%/goose-3.22.1 create dictionary sql
+                # export DATABASE_URL="postgres://user:password@localhost:5432/dbname?sslmode=disable"
+                # goose up
+                # goose down
+                # %teamcity.agent.work.dir%/goose-3.22.1 status
+            """.trimIndent()
+        }
+        stepsOrder = arrayListOf("RUNNER_1932", "RUNNER_2251", "RUNNER_2235", "RUNNER_13038", "RUNNER_1004", "RUNNER_738")
+    }
+    features {
+        swabra {
+            id = "swabra"
+            filesCleanup = Swabra.FilesCleanup.AFTER_BUILD
+            forceCleanCheckout = true
+            verbose = true
+            paths = """
+                +:%env.ENVS_PATH%/%env.stand_name%/files/dbmigrations/*.jar
+                +:*.jar
+            """.trimIndent()
+        }
+    }
+
+    requirements {
+        equals("system.agent.name", "dos-p0adl-05-01", "RQ_245")
+    }
+
+    disableSettings("RQ_245", "RQ_246", "ssh-agent-build-feature")
+})
